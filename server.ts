@@ -157,6 +157,11 @@ async function startServer() {
         secondaryLicense,
         prompts,
         resolution,
+        variationType,
+        customPrompt,
+        artStyle,
+        title,
+        artistName,
       } = req.body ?? {};
 
       if (license === 'not_allowed' || secondaryLicense === 'not_allowed') {
@@ -186,8 +191,9 @@ async function startServer() {
           : null;
 
       const ai = getGeminiClient();
+      const targetPrompts = prompts.slice(0, 4);
 
-      const variationRequests = prompts.slice(0, 4).map(async (entry: unknown, idx: number) => {
+      const variationRequests = targetPrompts.map(async (entry: unknown, idx: number) => {
         const promptText =
           typeof entry === 'object' && entry !== null && 'prompt' in entry
             ? String((entry as { prompt: unknown }).prompt)
@@ -270,19 +276,161 @@ async function startServer() {
         (r): r is PromiseRejectedResult => r.status === 'rejected',
       );
 
-      if (variations.length === 0) {
-        const firstReason = failures[0]?.reason;
-        const details = extractGeminiErrorDetails(firstReason);
-        res.status(details.status).json({ error: details.message });
+      if (variations.length > 0) {
+        res.json({
+          mode: 'gemini_image',
+          variations,
+          warning:
+            failures.length > 0
+              ? `${failures.length} variation(s) could not be generated; showing ${variations.length} completed variations.`
+              : undefined,
+        });
         return;
       }
 
+      // Automatic Free-Tier Hybrid Fallback using gemini-4-hydrogen
+      const firstReason = failures[0]?.reason;
+      const errDetails = extractGeminiErrorDetails(firstReason);
+      const rawErrMsg =
+        firstReason instanceof Error ? firstReason.message.toLowerCase() : String(firstReason).toLowerCase();
+      const isQuotaOrBillingOrModelIssue =
+        errDetails.status === 429 ||
+        errDetails.status === 403 ||
+        rawErrMsg.includes('billing') ||
+        rawErrMsg.includes('paid') ||
+        rawErrMsg.includes('not_found') ||
+        rawErrMsg.includes('404') ||
+        rawErrMsg.includes('400');
+
+      if (!isQuotaOrBillingOrModelIssue) {
+        res.status(errDetails.status).json({ error: errDetails.message });
+        return;
+      }
+
+      const desiredCount = targetPrompts.length;
+      const fallbackParts: Array<
+        | { inlineData: { mimeType: string; data: string } }
+        | { text: string }
+      > = [
+        {
+          inlineData: {
+            mimeType: primaryPart.mimeType,
+            data: primaryPart.data,
+          },
+        },
+      ];
+      if (secondaryPart) {
+        fallbackParts.push({
+          inlineData: {
+            mimeType: secondaryPart.mimeType,
+            data: secondaryPart.data,
+          },
+        });
+      }
+
+      const hybridPrompt = [
+        `You are a Kolkata folk-art creative director helping design ${desiredCount} distinct visual remix specifications for "${title || 'Folk Motif'}" (${artStyle || 'Patachitra'} by ${artistName || 'Artisan'}).`,
+        `Selected variation mode: "${variationType || 'color_palette'}".`,
+        `User creative direction: "${customPrompt || 'Respect traditional heritage pigments and craft clarity'}".`,
+        `Generate exactly ${desiredCount} distinct, culturally authentic color & composition specifications in JSON so a high-DPI Canvas renderer can apply them to the uploaded artwork:`,
+        '- Choose rich, harmonious 6-digit hex codes for backgroundHex, primaryHex, secondaryHex, accentHex, and inkHex.',
+        '- Choose the most fitting treatment.mode from: "pigment_remap", "tile_grid", "border_frieze", "woodblock_poster", "dual_blend", "mood_wash".',
+        '- For "pattern_tiling", vary tileCols (2 or 3) and alternate "tile_grid" and "border_frieze".',
+        '- For "simplified_modern", use "woodblock_poster" with high contrast (1.2-1.4).',
+        '- For "mix_second_motif", use "dual_blend" with blendOpacity between 0.25 and 0.5.',
+        '- Choose frameStyle from: "none", "patachitra_border", "alpona_corners", "kantha_stitch".',
+      ].join('\n');
+
+      fallbackParts.push({ text: hybridPrompt });
+
+      const hybridResponse = await ai.models.generateContent({
+        model: 'gemini-4-hydrogen',
+        contents: { parts: fallbackParts },
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              specs: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    title: { type: Type.STRING },
+                    angleLabel: { type: Type.STRING },
+                    palette: {
+                      type: Type.OBJECT,
+                      properties: {
+                        backgroundHex: { type: Type.STRING },
+                        primaryHex: { type: Type.STRING },
+                        secondaryHex: { type: Type.STRING },
+                        accentHex: { type: Type.STRING },
+                        inkHex: { type: Type.STRING },
+                      },
+                    },
+                    treatment: {
+                      type: Type.OBJECT,
+                      properties: {
+                        mode: { type: Type.STRING },
+                        tileCols: { type: Type.INTEGER },
+                        frameStyle: { type: Type.STRING },
+                        contrast: { type: Type.NUMBER },
+                        saturation: { type: Type.NUMBER },
+                        blendOpacity: { type: Type.NUMBER },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      });
+
+      const parsedHybrid = JSON.parse((hybridResponse.text ?? '{}').trim());
+      const rawSpecs = Array.isArray(parsedHybrid.specs) ? parsedHybrid.specs : [];
+
+      const specs = targetPrompts.map((entry: unknown, idx: number) => {
+        const promptText =
+          typeof entry === 'object' && entry !== null && 'prompt' in entry
+            ? String((entry as { prompt: unknown }).prompt)
+            : String(entry);
+        const fallbackAngle =
+          typeof entry === 'object' && entry !== null && 'angleLabel' in entry
+            ? String((entry as { angleLabel: unknown }).angleLabel)
+            : `Variation ${idx + 1}`;
+        const item = rawSpecs[idx] ?? rawSpecs[0] ?? {};
+        return {
+          id: `var_${Date.now()}_${idx + 1}`,
+          title: typeof item.title === 'string' ? item.title : `Variation ${idx + 1}`,
+          angleLabel:
+            typeof item.angleLabel === 'string' && item.angleLabel.trim()
+              ? `${item.title ? `${item.title}: ` : ''}${item.angleLabel}`
+              : fallbackAngle,
+          promptUsed: promptText,
+          palette: {
+            backgroundHex: item.palette?.backgroundHex || '#F5EFE2',
+            primaryHex: item.palette?.primaryHex || '#9A3412',
+            secondaryHex: item.palette?.secondaryHex || '#D4922A',
+            accentHex: item.palette?.accentHex || '#1E3A5F',
+            inkHex: item.palette?.inkHex || '#1C1917',
+          },
+          treatment: {
+            mode: item.treatment?.mode || 'pigment_remap',
+            tileCols: Number(item.treatment?.tileCols) || 2,
+            frameStyle: item.treatment?.frameStyle || 'patachitra_border',
+            contrast: Number(item.treatment?.contrast) || 1.15,
+            saturation: Number(item.treatment?.saturation) || 0.9,
+            blendOpacity: Number(item.treatment?.blendOpacity) || 0.32,
+          },
+        };
+      });
+
       res.json({
-        variations,
-        warning:
-          failures.length > 0
-            ? `${failures.length} variation(s) could not be generated; showing ${variations.length} completed variations.`
-            : undefined,
+        mode: 'gemini_hybrid_canvas',
+        fallbackInfo:
+          'Free-Tier Hybrid Mode active: Gemini 4 Hydrogen directed these pigment and layout variations, rendered locally on high-DPI Canvas.',
+        specs,
       });
     } catch (error) {
       const details = extractGeminiErrorDetails(error);

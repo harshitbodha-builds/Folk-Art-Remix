@@ -23,6 +23,10 @@ import {
   ensureImageDataUrl,
   saveRemixWithProvenance,
 } from '../utils/storage';
+import {
+  type HybridVariationSpec,
+  renderHybridVariationToDataUrl,
+} from '../utils/remixCanvas';
 
 interface GeneratedVariation {
   id: string;
@@ -69,6 +73,7 @@ export const RemixStudioPage: React.FC<RemixStudioPageProps> = ({
   const [isGenerating, setIsGenerating] = useState(false);
   const [generateError, setGenerateError] = useState<string | null>(null);
   const [generateWarning, setGenerateWarning] = useState<string | null>(null);
+  const [hybridNotice, setHybridNotice] = useState<string | null>(null);
   const [generatedVariations, setGeneratedVariations] = useState<GeneratedVariation[]>([]);
   const [savedVariationIds, setSavedVariationIds] = useState<Record<string, string>>({});
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -78,6 +83,7 @@ export const RemixStudioPage: React.FC<RemixStudioPageProps> = ({
     setGeneratedVariations([]);
     setGenerateError(null);
     setGenerateWarning(null);
+    setHybridNotice(null);
     setSavedVariationIds({});
     setSaveError(null);
   }, [activeMotif?.id]);
@@ -150,6 +156,7 @@ export const RemixStudioPage: React.FC<RemixStudioPageProps> = ({
     setIsGenerating(true);
     setGenerateError(null);
     setGenerateWarning(null);
+    setHybridNotice(null);
     setSaveError(null);
 
     try {
@@ -183,6 +190,11 @@ export const RemixStudioPage: React.FC<RemixStudioPageProps> = ({
           license: activeMotif.license,
           secondaryLicense: secondaryMotif?.license,
           resolution,
+          variationType,
+          customPrompt,
+          artStyle: activeMotif.artStyle,
+          title: activeMotif.title,
+          artistName: activeMotif.artistName,
           prompts,
         }),
       });
@@ -192,7 +204,30 @@ export const RemixStudioPage: React.FC<RemixStudioPageProps> = ({
         throw new Error(payload.error || 'Gemini failed to generate motif variations.');
       }
 
-      setGeneratedVariations(Array.isArray(payload.variations) ? payload.variations : []);
+      if (payload.mode === 'gemini_hybrid_canvas' && Array.isArray(payload.specs)) {
+        const rendered = await Promise.all(
+          (payload.specs as HybridVariationSpec[]).map(async (spec) => ({
+            id: spec.id,
+            angleLabel: spec.angleLabel,
+            promptUsed: spec.promptUsed,
+            imageDataUrl: await renderHybridVariationToDataUrl({
+              primaryImageSrc: primaryImageBase64,
+              secondaryImageSrc: secondaryImageBase64,
+              variationType,
+              resolution,
+              spec,
+            }),
+          })),
+        );
+        setGeneratedVariations(rendered);
+        setHybridNotice(
+          payload.fallbackInfo ||
+            'Free-Tier Hybrid Mode: Gemini 4 Hydrogen directed these variations, rendered on high-DPI Canvas.',
+        );
+      } else {
+        setGeneratedVariations(Array.isArray(payload.variations) ? payload.variations : []);
+      }
+
       if (payload.warning) {
         setGenerateWarning(payload.warning);
       }
@@ -616,6 +651,13 @@ export const RemixStudioPage: React.FC<RemixStudioPageProps> = ({
       {generateWarning && (
         <div className="p-3 bg-[#FFFBEB] border border-[#FDE68A] rounded-md text-xs text-[#92400E]">
           {generateWarning}
+        </div>
+      )}
+
+      {hybridNotice && (
+        <div className="p-3.5 bg-[#EFF6FF] border border-[#BFDBFE] rounded-md text-xs text-[#1E3A8A] flex items-center gap-2">
+          <ShieldCheck className="w-4 h-4 shrink-0" aria-hidden="true" />
+          <span>{hybridNotice}</span>
         </div>
       )}
 
