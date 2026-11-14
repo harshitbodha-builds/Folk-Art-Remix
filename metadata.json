@@ -1,0 +1,8 @@
+{
+  "name": "Folk Art Remix with Credit",
+  "description": "Ethical AI folk-art remixing and provenance archive celebrating Bengali Patachitra, Alpona, and Kantha artisans with permanent attribution.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
